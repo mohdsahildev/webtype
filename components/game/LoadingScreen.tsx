@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useProgress } from '@react-three/drei';
 import { useGameRuntime } from '@/lib/game/game-state';
+import { isInitialAssetsReady, retryInitialAssets, preloadInitialAssets } from '@/lib/game/initial-assets';
 
 export function LoadingScreen() {
   const runtime = useGameRuntime();
@@ -11,25 +12,51 @@ export function LoadingScreen() {
   const [isReady, setIsReady] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
 
-  // Smooth progress bar animation
+  // Ensure preloading is active on mount
   useEffect(() => {
-    const targetProgress = active ? Math.max(progress, 10) : 100;
+    preloadInitialAssets();
+  }, []);
+
+  const hasErrors = errors && errors.length > 0;
+
+  // Real loading state & smooth progress animation
+  useEffect(() => {
+    if (hasErrors) return;
+
     const interval = setInterval(() => {
-      setDisplayProgress((prev) => {
-        if (prev < targetProgress) {
-          const next = Math.min(prev + Math.max(1, (targetProgress - prev) * 0.2), targetProgress);
-          return Math.round(next);
-        }
-        return prev;
-      });
+      const ready = isInitialAssetsReady();
+
+      if (ready) {
+        // All required assets are genuinely resolved and cached in memory
+        setDisplayProgress((prev) => {
+          if (prev < 100) {
+            const next = Math.min(prev + Math.max(2, (100 - prev) * 0.25), 100);
+            return Math.round(next);
+          }
+          return 100;
+        });
+      } else {
+        // Still downloading / parsing assets - clamp target to max 95% until genuinely ready
+        const currentTarget = active
+          ? Math.min(95, Math.max(progress, 10))
+          : Math.min(90, Math.max(10, displayProgress));
+
+        setDisplayProgress((prev) => {
+          if (prev < currentTarget) {
+            const next = Math.min(prev + Math.max(1, (currentTarget - prev) * 0.15), currentTarget);
+            return Math.round(next);
+          }
+          return prev;
+        });
+      }
     }, 30);
 
     return () => clearInterval(interval);
-  }, [active, progress]);
+  }, [active, progress, hasErrors, displayProgress]);
 
-  // Detect when fully loaded -> Transition automatically into 3D Main Menu
+  // Transition automatically into 3D Main Menu ONLY once all required assets are genuinely loaded
   useEffect(() => {
-    if (displayProgress >= 100 && !active) {
+    if (displayProgress >= 100 && isInitialAssetsReady() && !hasErrors && !hasStarted) {
       const timer = setTimeout(() => {
         setIsReady(true);
         setHasStarted(true);
@@ -39,15 +66,24 @@ export function LoadingScreen() {
       }, 300);
       return () => clearTimeout(timer);
     }
-  }, [displayProgress, active, runtime]);
+  }, [displayProgress, hasErrors, hasStarted, runtime]);
 
-  const handleStartGame = () => {
+  const handleStartGame = useCallback(() => {
     if (!isReady || hasStarted) return;
     setHasStarted(true);
     setTimeout(() => {
       runtime.setStatus('menu');
     }, 200);
-  };
+  }, [isReady, hasStarted, runtime]);
+
+  // Handle retry action upon asset load failure
+  const handleRetry = useCallback(() => {
+    setDisplayProgress(0);
+    setIsReady(false);
+    setHasStarted(false);
+    retryInitialAssets();
+    useProgress.setState({ errors: [], active: true, progress: 0 });
+  }, []);
 
   // Keyboard / Touch trigger to start
   useEffect(() => {
@@ -58,11 +94,9 @@ export function LoadingScreen() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  });
+  }, [isReady, hasStarted, handleStartGame]);
 
-  const hasErrors = errors && errors.length > 0;
-
-  if (hasStarted && displayProgress >= 100) {
+  if (hasStarted && displayProgress >= 100 && isInitialAssetsReady()) {
     return null;
   }
 
@@ -85,7 +119,7 @@ export function LoadingScreen() {
               FAILED TO LOAD
             </p>
             <button
-              onClick={() => window.location.reload()}
+              onClick={handleRetry}
               className="px-6 py-2 bg-slate-800 hover:bg-slate-700 text-[#F4F7FA] border border-slate-700 font-mono text-xs font-bold tracking-wider uppercase rounded-lg cursor-pointer"
             >
               RETRY
